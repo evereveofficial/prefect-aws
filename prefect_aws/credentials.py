@@ -1,26 +1,31 @@
 """Module handling AWS credentials"""
 
-from typing import Optional
+from enum import Enum
+from typing import Any, Optional, Union
 
 import boto3
-from prefect.blocks.core import Block
-from pydantic import SecretStr
+from mypy_boto3_s3 import S3Client
+from mypy_boto3_secretsmanager import SecretsManagerClient
+from prefect.blocks.abstract import CredentialsBlock
+from pydantic import Field, SecretStr
+
+from prefect_aws.client_parameters import AwsClientParameters
 
 
-class AwsCredentials(Block):
+class ClientType(Enum):
+
+    S3 = "s3"
+    ECS = "ecs"
+    BATCH = "batch"
+    SECRETS_MANAGER = "secretsmanager"
+
+
+class AwsCredentials(CredentialsBlock):
     """
     Block used to manage authentication with AWS. AWS authentication is
     handled via the `boto3` module. Refer to the
     [boto3 docs](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html)
     for more info about the possible credential configurations.
-
-    Args:
-        aws_access_key_id: A specific AWS access key ID.
-        aws_secret_access_key: A specific AWS secret access key.
-        aws_session_token: The session key for your AWS account.
-            This is only needed when you are using temporary credentials.
-        profile_name: The profile to use when creating your session.
-        region_name: The AWS Region where you want to create new connections.
 
     Example:
         Load stored AWS credentials:
@@ -34,11 +39,36 @@ class AwsCredentials(Block):
     _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/1jbV4lceHOjGgunX15lUwT/db88e184d727f721575aeb054a37e277/aws.png?h=250"  # noqa
     _block_type_name = "AWS Credentials"
 
-    aws_access_key_id: Optional[str] = None
-    aws_secret_access_key: Optional[SecretStr] = None
-    aws_session_token: Optional[str] = None
-    profile_name: Optional[str] = None
-    region_name: Optional[str] = None
+    aws_access_key_id: Optional[str] = Field(
+        default=None,
+        description="A specific AWS access key ID.",
+        title="AWS Access Key ID",
+    )
+    aws_secret_access_key: Optional[SecretStr] = Field(
+        default=None,
+        description="A specific AWS secret access key.",
+        title="AWS Access Key Secret",
+    )
+    aws_session_token: Optional[str] = Field(
+        default=None,
+        description=(
+            "The session key for your AWS account. "
+            "This is only needed when you are using temporary credentials."
+        ),
+        title="AWS Session Token",
+    )
+    profile_name: Optional[str] = Field(
+        default=None, description="The profile to use when creating your session."
+    )
+    region_name: Optional[str] = Field(
+        default=None,
+        description="The AWS Region where you want to create new connections.",
+    )
+    aws_client_parameters: AwsClientParameters = Field(
+        default_factory=AwsClientParameters,
+        description="Extra parameters to initialize the Client.",
+        title="AWS Client Parameters",
+    )
 
     def get_boto3_session(self) -> boto3.Session:
         """
@@ -69,14 +99,53 @@ class AwsCredentials(Block):
             region_name=self.region_name,
         )
 
+    def get_client(self, client_type: Union[str, ClientType]) -> Any:
+        """
+        Helper method to dynamically get a client type.
 
-class MinIOCredentials(Block):
+        Args:
+            client_type: The client's service name.
+
+        Returns:
+            An authenticated client.
+
+        Raises:
+            ValueError: if the client is not supported.
+        """
+        if isinstance(client_type, ClientType):
+            client_type = client_type.value
+
+        client = self.get_boto3_session().client(
+            service_name=client_type, **self.aws_client_parameters.get_params_override()
+        )
+        return client
+
+    def get_s3_client(self) -> S3Client:
+        """
+        Gets an authenticated S3 client.
+
+        Returns:
+            An authenticated S3 client.
+        """
+        return self.get_client(client_type=ClientType.S3)
+
+    def get_secrets_manager_client(self) -> SecretsManagerClient:
+        """
+        Gets an authenticated Secrets Manager client.
+
+        Returns:
+            An authenticated Secrets Manager client.
+        """
+        return self.get_client(client_type=ClientType.SECRETS_MANAGER)
+
+
+class MinIOCredentials(CredentialsBlock):
     """
     Block used to manage authentication with MinIO. Refer to the
     [MinIO docs](https://docs.min.io/docs/minio-server-configuration-guide.html)
     for more info about the possible credential configurations.
 
-    Args:
+    Attributes:
         minio_root_user: Admin or root user.
         minio_root_password: Admin or root password.
         region_name: Location of server, e.g. "us-east-1".
@@ -98,9 +167,18 @@ class MinIOCredentials(Block):
         "for more info about the possible credential configurations."
     )
 
-    minio_root_user: str
-    minio_root_password: SecretStr
-    region_name: Optional[str] = None
+    minio_root_user: str = Field(default=..., description="Admin or root user.")
+    minio_root_password: SecretStr = Field(
+        default=..., description="Admin or root password."
+    )
+    region_name: Optional[str] = Field(
+        default=None,
+        description="The AWS Region where you want to create new connections.",
+    )
+    aws_client_parameters: AwsClientParameters = Field(
+        default_factory=AwsClientParameters,
+        description="Extra parameters to initialize the Client.",
+    )
 
     def get_boto3_session(self) -> boto3.Session:
         """
@@ -133,3 +211,33 @@ class MinIOCredentials(Block):
             aws_secret_access_key=minio_root_password,
             region_name=self.region_name,
         )
+
+    def get_client(self, client_type: Union[str, ClientType]) -> Any:
+        """
+        Helper method to dynamically get a client type.
+
+        Args:
+            client_type: The client's service name.
+
+        Returns:
+            An authenticated client.
+
+        Raises:
+            ValueError: if the client is not supported.
+        """
+        if isinstance(client_type, ClientType):
+            client_type = client_type.value
+
+        client = self.get_boto3_session().client(
+            service_name=client_type, **self.aws_client_parameters.get_params_override()
+        )
+        return client
+
+    def get_s3_client(self) -> S3Client:
+        """
+        Gets an authenticated S3 client.
+
+        Returns:
+            An authenticated S3 client.
+        """
+        return self.get_client(client_type=ClientType.S3)
