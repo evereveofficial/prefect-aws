@@ -362,6 +362,8 @@ class AwsSecret(SecretBlock):
         aws_credentials: The credentials to use for authentication with AWS.
         secret_name: The name of the secret.
     """
+    _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/1jbV4lceHOjGgunX15lUwT/db88e184d727f721575aeb054a37e277/aws.png?h=250"  # noqa
+    _block_type_name = "AWS Secret"
 
     aws_credentials: AwsCredentials
     secret_name: str = Field(default=..., description="The name of the secret.")
