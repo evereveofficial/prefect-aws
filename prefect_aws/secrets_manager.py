@@ -332,9 +332,9 @@ async def delete_secret(
 
     delete_secret_kwargs: Dict[str, Union[str, int, bool]] = dict(SecretId=secret_name)
     if force_delete_without_recovery:
-        delete_secret_kwargs["ForceDeleteWithoutRecovery"] = (
-            force_delete_without_recovery
-        )
+        delete_secret_kwargs[
+            "ForceDeleteWithoutRecovery"
+        ] = force_delete_without_recovery
     else:
         delete_secret_kwargs["RecoveryWindowInDays"] = recovery_window_in_days
 
@@ -362,9 +362,6 @@ class AwsSecret(SecretBlock):
         aws_credentials: The credentials to use for authentication with AWS.
         secret_name: The name of the secret.
     """
-    _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/1jbV4lceHOjGgunX15lUwT/db88e184d727f721575aeb054a37e277/aws.png?h=250"  # noqa
-    _block_type_name = "AWS Secret"
-
     _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/1jbV4lceHOjGgunX15lUwT/db88e184d727f721575aeb054a37e277/aws.png?h=250"  # noqa
     _block_type_name = "AWS Secret"
     _documentation_url = "https://prefecthq.github.io/prefect-aws/secrets_manager/#prefect_aws.secrets_manager.AwsSecret"  # noqa
@@ -492,7 +489,7 @@ class AwsSecret(SecretBlock):
             )
         elif not (7 <= recovery_window_in_days <= 30):
             raise ValueError(
-                "Recovery window must be between 7 and 30 days, got "
+                f"Recovery window must be between 7 and 30 days, got "
                 f"{recovery_window_in_days}."
             )
 
