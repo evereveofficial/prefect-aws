@@ -8,19 +8,19 @@ from unittest.mock import MagicMock
 import anyio
 import pytest
 import yaml
+from botocore.exceptions import ClientError
 from moto import mock_ec2, mock_ecs, mock_logs
 from moto.ec2.utils import generate_instance_identity_document
-from prefect.docker import get_prefect_image_name
 from prefect.exceptions import InfrastructureNotAvailable, InfrastructureNotFound
 from prefect.logging.configuration import setup_logging
-from prefect.orion.schemas.core import Deployment, Flow, FlowRun
+from prefect.server.schemas.core import Deployment, Flow, FlowRun
 from prefect.utilities.asyncutils import run_sync_in_worker_thread
+from prefect.utilities.dockerutils import get_prefect_image_name
 from pydantic import ValidationError
 
 from prefect_aws.ecs import (
     ECS_DEFAULT_CPU,
     ECS_DEFAULT_MEMORY,
-    PREFECT_ECS_CONTAINER_NAME,
     ECSTask,
     get_container,
     get_prefect_container,
@@ -59,22 +59,25 @@ def inject_moto_patches(moto_mock, patches: Dict[str, List[Callable]]):
                 )
 
 
-def patch_describe_tasks_add_prefect_container(describe_tasks, *args, **kwargs):
-    """
-    Adds the minimal prefect container to moto's task description.
-    """
-    result = describe_tasks(*args, **kwargs)
-    for task in result:
-        task.containers = [{"name": PREFECT_ECS_CONTAINER_NAME}]
-    return result
-
-
 def patch_run_task(mock, run_task, *args, **kwargs):
     """
     Track calls to `run_task` by calling a mock as well.
     """
     mock(*args, **kwargs)
     return run_task(*args, **kwargs)
+
+
+def patch_describe_tasks_add_prefect_container(describe_tasks, *args, **kwargs):
+    """
+    Adds the minimal prefect container to moto's task description.
+    """
+    result = describe_tasks(*args, **kwargs)
+    for task in result:
+        if not task.containers:
+            task.containers = []
+        if not get_prefect_container(task.containers):
+            task.containers.append({"name": "prefect"})
+    return result
 
 
 def patch_calculate_task_resource_requirements(
@@ -173,7 +176,9 @@ def describe_task(ecs_client, task_arn, **kwargs) -> dict:
     """
     Describe a single ECS task
     """
-    return ecs_client.describe_tasks(tasks=[task_arn], **kwargs)["tasks"][0]
+    return ecs_client.describe_tasks(tasks=[task_arn], include=["TAGS"], **kwargs)[
+        "tasks"
+    ][0]
 
 
 async def stop_task(ecs_client, task_arn, **kwargs):
@@ -241,7 +246,7 @@ def ecs_mocks(aws_credentials):
                 inject_moto_patches(
                     ecs,
                     {
-                        # Add a container when describing any task
+                        # Ensure container is created in described tasks
                         "describe_tasks": [patch_describe_tasks_add_prefect_container],
                         # Fix moto internal resource requirement calculations
                         "_calculate_task_resource_requirements": [
@@ -862,7 +867,6 @@ async def test_execution_role_arn_in_task_definition(
 @pytest.mark.usefixtures("ecs_mocks")
 @pytest.mark.parametrize("default_cluster", [True, False])
 async def test_cluster(aws_credentials, default_cluster: bool):
-
     session = aws_credentials.get_boto3_session()
     ecs_client = session.client("ecs")
 
@@ -949,7 +953,11 @@ async def test_network_config_from_vpc_id(aws_credentials):
 
     # Subnet ids are copied from the vpc
     assert network_configuration == {
-        "awsvpcConfiguration": {"subnets": [subnet.id], "assignPublicIp": "ENABLED"}
+        "awsvpcConfiguration": {
+            "subnets": [subnet.id],
+            "assignPublicIp": "ENABLED",
+            "securityGroups": [],
+        }
     }
 
 
@@ -983,6 +991,7 @@ async def test_network_config_from_default_vpc(aws_credentials):
         "awsvpcConfiguration": {
             "subnets": [subnet["SubnetId"] for subnet in default_subnets],
             "assignPublicIp": "ENABLED",
+            "securityGroups": [],
         }
     }
 
@@ -1067,7 +1076,10 @@ async def test_logging_requires_execution_role_arn(aws_credentials):
 async def test_log_options_requires_logging(aws_credentials):
     with pytest.raises(
         ValidationError,
-        match="`configure_cloudwatch_log` must be enabled to use `cloudwatch_logs_options`",  # noqa
+        match=(  # noqa
+            "`configure_cloudwatch_log` must be enabled to use"
+            " `cloudwatch_logs_options`"
+        ),
     ):
         ECSTask(
             aws_credentials=aws_credentials,
@@ -1242,7 +1254,8 @@ async def test_bridge_network_mode_warns_on_fargate(aws_credentials, launch_type
             f"{launch_type!r}"
         ),
     ):
-        await run_then_stop_task(task)
+        with pytest.raises(ClientError):
+            await run_then_stop_task(task)
 
 
 @pytest.mark.usefixtures("ecs_mocks")
@@ -1259,9 +1272,8 @@ async def test_deregister_task_definition(aws_credentials):
     task_arn = await run_then_stop_task(task)
 
     task = describe_task(ecs_client, task_arn)
-    with pytest.raises(Exception, match="is not a task_definition"):
-        # Oh no it's gone
-        describe_task_definition(ecs_client, task)
+    task_definition = describe_task_definition(ecs_client, task)
+    assert task_definition["status"] == "INACTIVE"
 
 
 @pytest.mark.usefixtures("ecs_mocks")
@@ -1456,7 +1468,8 @@ async def test_task_definition_arn_with_overrides_that_require_copy(
         "Settings require changes to the linked task definition. "
         "A new task definition will be registered. "
         "Enable DEBUG level logs to see the difference."
-    ) in caplog.text
+        in caplog.text
+    )
 
 
 @pytest.mark.usefixtures("ecs_mocks")
@@ -1488,16 +1501,15 @@ async def test_task_definition_arn_with_overrides_requiring_copy_shows_diff(
     assert (
         "Settings require changes to the linked task definition. "
         "A new task definition will be registered. "
-    ) in caplog.text
+        in caplog.text
+    )
 
-    assert ("Enable DEBUG level logs to see the difference.") not in caplog.text
+    assert "Enable DEBUG level logs to see the difference." not in caplog.text
 
-    expected_diff = textwrap.dedent(
-        """
+    expected_diff = textwrap.dedent("""
         -                            'image': 'prefecthq/prefect:2.1.0-python3.8',
         +                            'image': 'foobar',
-        """
-    )
+        """)
     assert expected_diff in caplog.text
 
 
@@ -1535,7 +1547,9 @@ async def test_task_definition_arn_with_overrides_that_do_not_require_copy(
         create_test_ecs_cluster(ecs_client, overrides["cluster"])
         add_ec2_instance_to_ecs_cluster(session, overrides["cluster"])
 
-    task_definition_arn = ecs_client.register_task_definition(**BASE_TASK_DEFINITION,)[
+    task_definition_arn = ecs_client.register_task_definition(
+        **BASE_TASK_DEFINITION,
+    )[
         "taskDefinition"
     ]["taskDefinitionArn"]
 
@@ -1578,8 +1592,7 @@ async def test_deregister_task_definition_does_not_apply_to_linked_arn(aws_crede
     task_arn = await run_then_stop_task(task)
 
     task = describe_task(ecs_client, task_arn)
-    # The task definition can be retrieved still
-    assert describe_task_definition(ecs_client, task)
+    describe_task_definition(ecs_client, task)["status"] == "ACTIVE"
 
 
 @pytest.mark.usefixtures("ecs_mocks")
@@ -1620,8 +1633,8 @@ async def test_adding_security_groups_to_network_config(aws_credentials):
     assert network_configuration == {
         "awsvpcConfiguration": {
             "subnets": [subnet.id],
-            "securityGroups": [security_group_id],
             "assignPublicIp": "ENABLED",
+            "securityGroups": [security_group_id],
         }
     }
 
@@ -1661,6 +1674,7 @@ async def test_disable_public_ip_in_network_config(aws_credentials):
         "awsvpcConfiguration": {
             "subnets": [subnet.id],
             "assignPublicIp": "DISABLED",
+            "securityGroups": [],
         }
     }
 
@@ -1704,8 +1718,32 @@ async def test_custom_subnets_in_the_network_configuration(aws_credentials):
         "awsvpcConfiguration": {
             "subnets": [subnet.id],
             "assignPublicIp": "DISABLED",
+            "securityGroups": [],
         }
     }
+
+
+@pytest.mark.usefixtures("ecs_mocks")
+async def test_task_customizations_as_string(aws_credentials):
+    tc = (
+        '[{"op": "replace", "path": "/overrides/cpu", "value": "512"}, '
+        '{"op": "replace", "path": "/overrides/memory", "value": "1024"}]'
+    )
+
+    task = ECSTask(
+        aws_credentials=aws_credentials, memory=512, cpu=256, task_customizations=tc
+    )  # type: ignore
+
+    original_run_task = task._run_task
+    mock_run_task = MagicMock(side_effect=original_run_task)
+    task._run_task = mock_run_task
+
+    await run_then_stop_task(task)
+
+    overrides = mock_run_task.call_args[0][1].get("overrides")
+
+    assert overrides["memory"] == "1024"
+    assert overrides["cpu"] == "512"
 
 
 @pytest.mark.usefixtures("ecs_mocks")
@@ -1844,7 +1882,6 @@ async def test_family_from_task_definition_arn(aws_credentials, prepare_for_flow
     "cluster", [None, "default", "second-cluster", "second-cluster-arn"]
 )
 async def test_kill(aws_credentials, cluster: str):
-
     session = aws_credentials.get_boto3_session()
     ecs_client = session.client("ecs")
 

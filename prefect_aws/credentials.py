@@ -13,7 +13,6 @@ from prefect_aws.client_parameters import AwsClientParameters
 
 
 class ClientType(Enum):
-
     S3 = "s3"
     ECS = "ecs"
     BATCH = "batch"
@@ -38,6 +37,7 @@ class AwsCredentials(CredentialsBlock):
 
     _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/1jbV4lceHOjGgunX15lUwT/db88e184d727f721575aeb054a37e277/aws.png?h=250"  # noqa
     _block_type_name = "AWS Credentials"
+    _documentation_url = "https://prefecthq.github.io/prefect-aws/credentials/#prefect_aws.credentials.AwsCredentials"  # noqa
 
     aws_access_key_id: Optional[str] = Field(
         default=None,
@@ -166,6 +166,7 @@ class MinIOCredentials(CredentialsBlock):
         "docs: https://docs.min.io/docs/minio-server-configuration-guide.html "
         "for more info about the possible credential configurations."
     )
+    _documentation_url = "https://prefecthq.github.io/prefect-aws/credentials/#prefect_aws.credentials.MinIOCredentials"  # noqa
 
     minio_root_user: str = Field(default=..., description="Admin or root user.")
     minio_root_password: SecretStr = Field(

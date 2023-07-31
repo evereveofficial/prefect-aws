@@ -64,6 +64,25 @@ def object_in_folder(bucket, tmp_path):
 
 
 @pytest.fixture
+def objects_in_folder(bucket, tmp_path):
+    objects = []
+    for filename in [
+        "folderobject/foo.txt",
+        "folderobject/bar.txt",
+        "folder/object/foo.txt",
+        "folder/object/bar.txt",
+    ]:
+        file = tmp_path / filename
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("TEST OBJECTS IN FOLDER")
+        with open(file, "rb") as f:
+            filename = Path(filename)
+            obj = bucket.upload_fileobj(f, (filename.parent / filename.stem).as_posix())
+            objects.append(obj)
+    return objects
+
+
+@pytest.fixture
 def a_lot_of_objects(bucket, tmp_path):
     objects = []
     for i in range(0, 20):
@@ -242,6 +261,36 @@ async def test_s3_list_objects_prefix(
 
 
 @pytest.mark.parametrize("client_parameters", aws_clients, indirect=True)
+async def test_s3_list_objects_prefix_slashes(
+    object, client_parameters, objects_in_folder, aws_credentials
+):
+    @flow
+    async def test_flow(slash=False):
+        return await s3_list_objects(
+            bucket="bucket",
+            prefix="folder" + ("/" if slash else ""),
+            aws_credentials=aws_credentials,
+            aws_client_parameters=client_parameters,
+        )
+
+    objects = await test_flow(slash=True)
+    assert len(objects) == 2
+    assert [object["Key"] for object in objects] == [
+        "folder/object/bar",
+        "folder/object/foo",
+    ]
+
+    objects = await test_flow(slash=False)
+    assert len(objects) == 4
+    assert [object["Key"] for object in objects] == [
+        "folder/object/bar",
+        "folder/object/foo",
+        "folderobject/bar",
+        "folderobject/foo",
+    ]
+
+
+@pytest.mark.parametrize("client_parameters", aws_clients, indirect=True)
 async def test_s3_list_objects_filter(
     object, client_parameters, object_in_folder, aws_credentials
 ):
@@ -279,11 +328,9 @@ BUCKET_NAME = "test_bucket"
 
 @pytest.fixture
 def s3():
-
     """Mock connection to AWS S3 with boto3 client."""
 
     with mock_s3():
-
         yield boto3.client(
             service_name="s3",
             region_name="us-east-1",
@@ -311,13 +358,12 @@ def nested_s3_bucket_structure(s3, s3_bucket, tmp_path: Path):
 
 @pytest.fixture(params=["aws_credentials", "minio_credentials"])
 def s3_bucket(s3, request, aws_creds_block, minio_creds_block):
-
     key = request.param
 
     if key == "aws_credentials":
-        fs = S3Bucket(bucket_name=BUCKET_NAME, aws_credentials=aws_creds_block)
+        fs = S3Bucket(bucket_name=BUCKET_NAME, credentials=aws_creds_block)
     elif key == "minio_credentials":
-        fs = S3Bucket(bucket_name=BUCKET_NAME, minio_credentials=minio_creds_block)
+        fs = S3Bucket(bucket_name=BUCKET_NAME, credentials=minio_creds_block)
 
     s3.create_bucket(Bucket=BUCKET_NAME)
 
@@ -331,7 +377,6 @@ def s3_bucket_with_file(s3_bucket):
 
 
 async def test_read_write_roundtrip(s3_bucket):
-
     """
     Create an S3 bucket, instantiate S3Bucket block, write to and read from
     bucket.
@@ -342,7 +387,6 @@ async def test_read_write_roundtrip(s3_bucket):
 
 
 async def test_write_with_missing_directory_succeeds(s3_bucket):
-
     """
     Create an S3 bucket, instantiate S3Bucket block, write to path with
     missing directory.
@@ -353,7 +397,6 @@ async def test_write_with_missing_directory_succeeds(s3_bucket):
 
 
 async def test_read_fails_does_not_exist(s3_bucket):
-
     """
     Create an S3 bucket, instantiate S3Bucket block, assert read from
     nonexistent path fails.
@@ -365,28 +408,20 @@ async def test_read_fails_does_not_exist(s3_bucket):
 
 @pytest.mark.parametrize("type_", [PureWindowsPath, PurePosixPath, str])
 @pytest.mark.parametrize("delimiter", ["\\", "/"])
-async def test_aws_basepath(s3_bucket, aws_creds_block, delimiter, type_):
-    """Test the basepath functionality."""
+async def test_aws_bucket_folder(s3_bucket, aws_creds_block, delimiter, type_):
+    """Test the bucket folder functionality."""
 
     # create a new block with a subfolder
     s3_bucket_block = S3Bucket(
         bucket_name=BUCKET_NAME,
-        aws_credentials=aws_creds_block,
-        basepath=type_(f"subfolder{delimiter}subsubfolder"),
+        credentials=aws_creds_block,
+        bucket_folder="subfolder/subsubfolder",
     )
 
     key = await s3_bucket_block.write_path("test.txt", content=b"hello")
     assert await s3_bucket_block.read_path("test.txt") == b"hello"
 
     expected: str = "subfolder/subsubfolder/test.txt"
-    if (
-        delimiter == "\\"
-        and type_ != PureWindowsPath
-        and (os.sep != "\\" and os.altsep != "\\")
-    ):
-        # In this case, \\ will not be recognized as a delimiter
-        # This case is triggered on POSIX systems
-        expected = "subfolder\\subsubfolder/test.txt"
     assert key == expected
 
 
@@ -401,13 +436,13 @@ async def test_get_directory(
     assert (tmp_path / "level1" / "level2" / "object2_level2.txt").exists()
 
 
-async def test_get_directory_respects_basepath(
+async def test_get_directory_respects_bucket_folder(
     nested_s3_bucket_structure, s3_bucket: S3Bucket, tmp_path: Path, aws_creds_block
 ):
     s3_bucket_block = S3Bucket(
         bucket_name=BUCKET_NAME,
-        aws_credentials=aws_creds_block,
-        basepath="level1/level2",
+        credentials=aws_creds_block,
+        bucket_folder="level1/level2",
     )
 
     await s3_bucket_block.get_directory(local_path=str(tmp_path))
@@ -538,32 +573,6 @@ async def test_put_directory_respects_local_path(
     assert (tmp_path / "downloaded_files" / "folder2" / "file5.txt").exists()
 
 
-async def test_too_many_credentials_arguments(
-    s3_bucket, aws_creds_block, minio_creds_block
-):
-
-    """Test providing too many credentials as input."""
-    with pytest.raises(ValueError, match="Only one set of credentials should be"):
-        # create a new block with a subfolder
-        S3Bucket(
-            bucket_name=BUCKET_NAME,
-            aws_credentials=aws_creds_block,
-            minio_credentials=minio_creds_block,
-            basepath="subfolder",
-        )
-
-
-async def test_too_few_credentials_arguments(s3_bucket, aws_creds_block):
-
-    """Test providing no credentials as input."""
-    with pytest.raises(ValueError, match="S3Bucket requires at least one"):
-        # create a new block with a subfolder
-        S3Bucket(
-            bucket_name=BUCKET_NAME,
-            basepath="subfolder",
-        )
-
-
 def test_read_path_in_sync_context(s3_bucket_with_file):
     """Test that read path works in a sync context."""
     s3_bucket, key = s3_bucket_with_file
@@ -583,15 +592,18 @@ def test_deployment_default_basepath(s3_bucket):
     assert deployment.location == "/"
 
 
-@pytest.mark.parametrize("type_", [str, Path])
-def test_deployment_set_basepath(aws_creds_block, type_):
+def test_deployment_set_basepath(aws_creds_block):
     s3_bucket_block = S3Bucket(
         bucket_name=BUCKET_NAME,
-        aws_credentials=aws_creds_block,
-        basepath=type_("home"),
+        credentials=aws_creds_block,
+        bucket_folder="home",
     )
     deployment = Deployment(name="testing", storage=s3_bucket_block)
     assert deployment.location == "home/"
+
+
+def test_resolve_path(s3_bucket):
+    assert s3_bucket._resolve_path("") == ""
 
 
 class TestS3Bucket:
@@ -611,8 +623,23 @@ class TestS3Bucket:
         return _s3_bucket
 
     @pytest.fixture
+    def s3_bucket_2_empty(self, credentials, bucket):
+        _s3_bucket = S3Bucket(
+            bucket_name="bucket",
+            credentials=credentials,
+            bucket_folder="subfolder",
+        )
+        return _s3_bucket
+
+    @pytest.fixture
     def s3_bucket_with_object(self, s3_bucket_empty, object):
         _s3_bucket_with_object = s3_bucket_empty  # object will be added
+        return _s3_bucket_with_object
+
+    @pytest.fixture
+    def s3_bucket_2_with_object(self, s3_bucket_2_empty):
+        _s3_bucket_with_object = s3_bucket_2_empty
+        s3_bucket_2_empty.write_path("object", content=b"TEST")
         return _s3_bucket_with_object
 
     @pytest.fixture
@@ -621,6 +648,17 @@ class TestS3Bucket:
             s3_bucket_with_object  # object in folder will be added
         )
         return _s3_bucket_with_objects
+
+    @pytest.fixture
+    def s3_bucket_with_similar_objects(self, s3_bucket_with_objects, objects_in_folder):
+        _s3_bucket_with_multiple_objects = (
+            s3_bucket_with_objects  # objects in folder will be added
+        )
+        return _s3_bucket_with_multiple_objects
+
+    def test_credentials_are_correct_type(self, credentials):
+        s3_bucket = S3Bucket(bucket_name="bucket", credentials=credentials)
+        assert isinstance(s3_bucket.credentials, type(credentials))
 
     @pytest.mark.parametrize("client_parameters", aws_clients[-1:], indirect=True)
     def test_list_objects_empty(self, s3_bucket_empty, client_parameters):
@@ -637,6 +675,27 @@ class TestS3Bucket:
         objects = s3_bucket_with_objects.list_objects()
         assert len(objects) == 2
         assert [object["Key"] for object in objects] == ["folder/object", "object"]
+
+    @pytest.mark.parametrize("client_parameters", aws_clients[-1:], indirect=True)
+    def test_list_objects_with_params(
+        self, s3_bucket_with_similar_objects, client_parameters
+    ):
+        objects = s3_bucket_with_similar_objects.list_objects("folder/object/")
+        assert len(objects) == 2
+        assert [object["Key"] for object in objects] == [
+            "folder/object/bar",
+            "folder/object/foo",
+        ]
+
+        objects = s3_bucket_with_similar_objects.list_objects("folder")
+        assert len(objects) == 5
+        assert [object["Key"] for object in objects] == [
+            "folder/object",
+            "folder/object/bar",
+            "folder/object/foo",
+            "folderobject/bar",
+            "folderobject/foo",
+        ]
 
     @pytest.mark.parametrize("to_path", [Path("to_path"), "to_path", None])
     @pytest.mark.parametrize("client_parameters", aws_clients[-1:], indirect=True)
@@ -670,6 +729,19 @@ class TestS3Bucket:
             to_path = ""
         to_path = Path(to_path)
         assert (to_path / "object").read_text() == "TEST OBJECT IN FOLDER"
+
+    @pytest.mark.parametrize("to_path", ["to_path", None])
+    @pytest.mark.parametrize("client_parameters", aws_clients[-1:], indirect=True)
+    def test_stream_from(
+        self,
+        s3_bucket_2_with_object: S3Bucket,
+        s3_bucket_empty: S3Bucket,
+        client_parameters,
+        to_path,
+    ):
+        path = s3_bucket_empty.stream_from(s3_bucket_2_with_object, "object", to_path)
+        data: bytes = s3_bucket_empty.read_path(path)
+        assert data == b"TEST"
 
     @pytest.mark.parametrize("to_path", ["new_object", None])
     @pytest.mark.parametrize("client_parameters", aws_clients[-1:], indirect=True)

@@ -15,7 +15,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## 0.3.6
+
+Released July 20th, 2023.
+
+### Changed
+- Promoted workers to GA, removed beta disclaimers
+
+## 0.3.5
+
+Released on July 14th, 2023.
+
 ### Fixed
+
+- Fixed `S3Bucket.stream_from` path resolution - [#291](https://github.com/PrefectHQ/prefect-aws/pull/291)
+- Fixed `ECSWorker` debug logs from failing to parse json - [#296](https://github.com/PrefectHQ/prefect-aws/pull/296)
+
+## 0.3.4
+
+Released on June 15th, 2023.
+
+### Added
+
+- Added `S3Bucket.stream_from` to copy objects between buckets - [#276](https://github.com/PrefectHQ/prefect-aws/pull/276)
+
+### Deprecated
+
+- `prefect_aws.projects` module. Use `prefect_aws.deployments` instead. - [#278](https://github.com/PrefectHQ/prefect-aws/pull/278)
+- `pull_project_from_s3` step. Use `pull_from_s3` instead. - [#278](https://github.com/PrefectHQ/prefect-aws/pull/278)
+- `push_project_to_s3` step. Use `push_to_s3` instead. - [#278](https://github.com/PrefectHQ/prefect-aws/pull/278)
+- `PullProjectFromS3Output` step output. Use `PullFromS3Output` instead. - [#278](https://github.com/PrefectHQ/prefect-aws/pull/278)
+- `PushProjectToS3Output` step output. Use `PushToS3Output` instead. - [#278](https://github.com/PrefectHQ/prefect-aws/pull/278)
+
+## 0.3.3
+
+Released on June 13th, 2023.
+
+### Fixed
+
+- Change prefect.docker import to prefect.utilities.dockerutils to fix a crash when using custom blocks based on S3Bucket  - [#273](https://github.com/PrefectHQ/prefect-aws/pull/273)
+
+## 0.3.2
+
+Released on May 25th, 2023.
+
+### Added
+
+- Stream ECS Worker flow run logs to the API - [#267](https://github.com/PrefectHQ/prefect-aws/pull/267)
+
+### Fixed
+
+- Fixed bug where incorrect credentials model was selected when `MinIOCredentials` was used with `S3Bucket` - [#254](https://github.com/PrefectHQ/prefect-aws/pull/254)
+- Fixed bug where `S3Bucket.list_objects` was truncating prefix paths ending with slashes - [#263](https://github.com/PrefectHQ/prefect-aws/pull/263)
+- Fixed bug where ECS worker could not cancel flow runs - [#268](https://github.com/PrefectHQ/prefect-aws/pull/268)
+
+## 0.3.1
+
+Released on April 20th, 2023.
+
+### Added
+
+- `ECSWorker` for executing Prefect flow runs as ECS tasks - [#238](https://github.com/PrefectHQ/prefect-aws/pull/238)
+
+### Fixed
+
+- Fixes retrieving files from large buckets via pagination in the `pull_project_from_s3` step - [#240](https://github.com/PrefectHQ/prefect-aws/pull/240)
+- Slugify tags to ensure compatibility with ECS limitations - [#245](https://github.com/PrefectHQ/prefect-aws/pull/245)
+
+## 0.3.0
+
+Released on April 6th, 2023.
+
+### Added
+
+- Support for unsigned AWS requests - [#220](https://github.com/PrefectHQ/prefect-aws/pull/220)
+- Added push and pull project steps for S3 - [#229](https://github.com/PrefectHQ/prefect-aws/pull/229)
+- `basepath` property to `S3Bucket` to maintain compatibility with storage block based deployments - [#231](https://github.com/PrefectHQ/prefect-aws/pull/231)
+
+### Changed
+
+- Added string support to `JsonPatch` implementation for task customizations Link [#233](https://github.com/PrefectHQ/prefect-aws/pull/233)
+
+### Removed
+
+- `basepath`, `aws_credentials` and `minio_credentials` fields from `S3Bucket` - [#231](https://github.com/PrefectHQ/prefect-aws/pull/231)
+
+## 0.2.5
+
+Released on March 13th, 2023.
+
+### Fixed
+
+- Fixed errors raised when using `write_path` and `read_path` with `credentials` field on `S3Bucket` - [#208](https://github.com/PrefectHQ/prefect-aws/pull/208)
+- Resolving paths in `S3Bucket` unintentionally generating an arbitrary UUID when path is an empty string - [#212](https://github.com/PrefectHQ/prefect-aws/pull/212)
+- Fixed crashes when pausing flow runs executed with `ECSTask` - [#218](https://github.com/PrefectHQ/prefect-aws/pull/218)
 
 ## 0.2.4
 

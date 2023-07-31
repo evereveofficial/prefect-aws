@@ -105,6 +105,7 @@ Examples:
 """
 import copy
 import difflib
+import json
 import logging
 import pprint
 import sys
@@ -115,16 +116,17 @@ from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional, Tuple, U
 import boto3
 import yaml
 from anyio.abc import TaskStatus
-from prefect.docker import get_prefect_image_name
 from prefect.exceptions import InfrastructureNotAvailable, InfrastructureNotFound
 from prefect.infrastructure.base import Infrastructure, InfrastructureResult
 from prefect.utilities.asyncutils import run_sync_in_worker_thread, sync_compatible
+from prefect.utilities.dockerutils import get_prefect_image_name
 from prefect.utilities.pydantic import JsonPatch
 from pydantic import Field, root_validator, validator
 from slugify import slugify
 from typing_extensions import Literal, Self
 
 from prefect_aws import AwsCredentials
+from prefect_aws.workers.ecs_worker import _TAG_REGEX
 
 # Internal type alias for ECS clients which are generated dynamically in botocore
 _ECSClient = Any
@@ -132,7 +134,7 @@ _ECSClient = Any
 
 if TYPE_CHECKING:
     from prefect.client.schemas import FlowRun
-    from prefect.orion.schemas.core import Deployment, Flow
+    from prefect.server.schemas.core import Deployment, Flow
 
 
 class ECSTaskResult(InfrastructureResult):
@@ -151,6 +153,7 @@ POST_REGISTRATION_FIELDS = [
     "requiresAttributes",
     "registeredAt",
     "registeredBy",
+    "deregisteredAt",
 ]
 
 
@@ -257,7 +260,7 @@ class ECSTask(Infrastructure):
         task_role_arn: An optional role to attach to the task run.
             This controls the permissions of the task while it is running.
         task_customizations: A list of JSON 6902 patches to apply to the task
-            run request.
+            run request. If a string is given, it will parsed as a JSON expression.
         task_start_timeout_seconds: The amount of time to watch for the
             start of the ECS task before marking it as failed. The task must
             enter a RUNNING state to be considered started.
@@ -269,6 +272,9 @@ class ECSTask(Infrastructure):
     _block_type_name = "ECS Task"
     _logo_url = "https://images.ctfassets.net/gm98wzqotmnx/1jbV4lceHOjGgunX15lUwT/db88e184d727f721575aeb054a37e277/aws.png?h=250"  # noqa
     _description = "Run a command as an ECS task."  # noqa
+    _documentation_url = (
+        "https://prefecthq.github.io/prefect-aws/ecs/#prefect_aws.ecs.ECSTask"  # noqa
+    )
 
     type: Literal["ecs-task"] = Field(
         "ecs-task", description="The slug for this task type."
@@ -386,15 +392,15 @@ class ECSTask(Infrastructure):
     )
 
     # Task run settings
-    launch_type: Optional[
-        Literal["FARGATE", "EC2", "EXTERNAL", "FARGATE_SPOT"]
-    ] = Field(
-        default="FARGATE",
-        description=(
-            "The type of ECS task run infrastructure that should be used. Note that "
-            "'FARGATE_SPOT' is not a formal ECS launch type, but we will configure the "
-            "proper capacity provider stategy if set here."
-        ),
+    launch_type: Optional[Literal["FARGATE", "EC2", "EXTERNAL", "FARGATE_SPOT"]] = (
+        Field(
+            default="FARGATE",
+            description=(
+                "The type of ECS task run infrastructure that should be used. Note that"
+                " 'FARGATE_SPOT' is not a formal ECS launch type, but we will configure"
+                " the proper capacity provider stategy if set here."
+            ),
+        )
     )
     vpc_id: Optional[str] = Field(
         title="VPC ID",
@@ -433,7 +439,10 @@ class ECSTask(Infrastructure):
     )
     task_customizations: JsonPatch = Field(
         default_factory=lambda: JsonPatch([]),
-        description="A list of JSON 6902 patches to apply to the task run request.",
+        description=(
+            "A list of JSON 6902 patches to apply to the task run request. "
+            "If a string is given, it will parsed as a JSON expression."
+        ),
     )
 
     # Execution settings
@@ -535,14 +544,16 @@ class ECSTask(Infrastructure):
 
     @validator("task_customizations", pre=True)
     def cast_customizations_to_a_json_patch(
-        cls, value: Union[List[Dict], JsonPatch]
+        cls, value: Union[List[Dict], JsonPatch, str]
     ) -> JsonPatch:
         """
         Casts lists to JsonPatch instances.
         """
+        if isinstance(value, str):
+            value = json.loads(value)
         if isinstance(value, list):
             return JsonPatch(value)
-        return value
+        return value  # type: ignore
 
     class Config:
         """Configuration of pydantic."""
@@ -643,7 +654,7 @@ class ECSTask(Infrastructure):
             identifier=identifier,
             # If the container does not start the exit code can be null but we must
             # still report a status code. We use a -1 to indicate a special code.
-            status_code=status_code or -1,
+            status_code=status_code if status_code is not None else -1,
         )
 
     @sync_compatible
@@ -684,7 +695,9 @@ class ECSTask(Infrastructure):
                 raise InfrastructureNotFound(
                     f"Cannot stop ECS task: the cluster {cluster!r} could not be found."
                 ) from exc
-            if "not find task" in str(exc):
+            if "not find task" in str(exc) or "referenced task was not found" in str(
+                exc
+            ):
                 raise InfrastructureNotFound(
                     f"Cannot stop ECS task: the task {task!r} could not be found in "
                     f"cluster {cluster!r}."
@@ -1004,9 +1017,9 @@ class ECSTask(Infrastructure):
         last_status = status = current_status
         t0 = time.time()
         while status != until_status:
-            tasks = ecs_client.describe_tasks(tasks=[task_arn], cluster=cluster_arn)[
-                "tasks"
-            ]
+            tasks = ecs_client.describe_tasks(
+                tasks=[task_arn], cluster=cluster_arn, include=["TAGS"]
+            )["tasks"]
 
             if tasks:
                 task = tasks[0]
@@ -1032,7 +1045,7 @@ class ECSTask(Infrastructure):
             if timeout is not None and elapsed_time > timeout:
                 raise RuntimeError(
                     f"Timed out after {elapsed_time}s while watching task for status "
-                    "{until_status or 'STOPPED'}"
+                    f"{until_status or 'STOPPED'}"
                 )
             time.sleep(self.task_watch_poll_interval)
 
@@ -1396,7 +1409,8 @@ class ECSTask(Infrastructure):
             )
             raise ValueError(
                 f"Failed to find {vpc_message}. "
-                "Network configuration cannot be inferred. " + help_message
+                "Network configuration cannot be inferred. "
+                + help_message
             )
 
         vpc_id = vpcs[0]["VpcId"]
@@ -1413,6 +1427,7 @@ class ECSTask(Infrastructure):
             "awsvpcConfiguration": {
                 "subnets": [s["SubnetId"] for s in subnets],
                 "assignPublicIp": "ENABLED",
+                "securityGroups": [],
             }
         }
 
@@ -1427,7 +1442,21 @@ class ECSTask(Infrastructure):
         task_run = {
             "overrides": self._prepare_task_run_overrides(),
             "tags": [
-                {"key": key, "value": value} for key, value in self.labels.items()
+                {
+                    "key": slugify(
+                        key,
+                        regex_pattern=_TAG_REGEX,
+                        allow_unicode=True,
+                        lowercase=False,
+                    ),
+                    "value": slugify(
+                        value,
+                        regex_pattern=_TAG_REGEX,
+                        allow_unicode=True,
+                        lowercase=False,
+                    ),
+                }
+                for key, value in self.labels.items()
             ],
             "taskDefinition": task_definition_arn,
         }
